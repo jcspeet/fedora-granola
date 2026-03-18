@@ -12,6 +12,8 @@ import logging
 
 import numpy as np
 import sounddevice as sd
+from scipy.signal import resample_poly
+from math import gcd
 
 from config import SAMPLE_RATE, CHANNELS, CHUNK_SECONDS, MIC_GAIN, MONITOR_GAIN
 
@@ -24,24 +26,52 @@ def find_monitor_device() -> int | None:
     Returns the sounddevice device index, or None if not found.
     """
     try:
+        devices = sd.query_devices()
+
+        # 1. Prefer Easy Effects Sink monitor (captures post-EQ system audio)
+        for i, dev in enumerate(devices):
+            if "easy effects sink" in dev["name"].lower() and dev["max_input_channels"] > 0:
+                logger.info("Found Easy Effects monitor: %s (index %d)", dev["name"], i)
+                return i
+
+        # 2. Get the default sink and find its monitor description via pactl
         result = subprocess.run(
             ["pactl", "get-default-sink"],
             capture_output=True, text=True, timeout=3
         )
         default_sink = result.stdout.strip()
-        monitor_name = f"{default_sink}.monitor"
+        monitor_source_name = f"{default_sink}.monitor"
 
-        devices = sd.query_devices()
-        # Exact match first
+        sources_result = subprocess.run(
+            ["pactl", "list", "sources"],
+            capture_output=True, text=True, timeout=3
+        )
+        description = None
+        current_name = None
+        for line in sources_result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Name:"):
+                current_name = line.split(":", 1)[1].strip()
+            elif line.startswith("Description:") and current_name == monitor_source_name:
+                description = line.split(":", 1)[1].strip()
+                break
+
+        if description:
+            # Description is e.g. "Monitor of Meteor Lake-P HD Audio Controller Speaker"
+            # Strip the "Monitor of " prefix to get the device name
+            device_label = description.lower().removeprefix("monitor of ")
+            for i, dev in enumerate(devices):
+                if device_label in dev["name"].lower() and dev["max_input_channels"] > 0:
+                    logger.info("Found monitor by description: %s (index %d)", dev["name"], i)
+                    return i
+
+        # 3. Fallback: find a Speaker output device that also accepts input (PipeWire monitor)
         for i, dev in enumerate(devices):
-            if monitor_name in dev["name"] and dev["max_input_channels"] > 0:
-                logger.info("Found monitor device: %s (index %d)", dev["name"], i)
+            name = dev["name"].lower()
+            if "speaker" in name and dev["max_input_channels"] > 0 and dev["max_output_channels"] > 0:
+                logger.info("Found monitor (speaker fallback): %s (index %d)", dev["name"], i)
                 return i
-        # Fuzzy fallback
-        for i, dev in enumerate(devices):
-            if "monitor" in dev["name"].lower() and dev["max_input_channels"] > 0:
-                logger.info("Found monitor device (fuzzy): %s (index %d)", dev["name"], i)
-                return i
+
     except Exception as e:
         logger.warning("Could not find monitor device: %s", e)
     return None
@@ -65,6 +95,7 @@ class AudioCapture:
         self._streams: list[sd.InputStream] = []
         self._chunk_thread: threading.Thread | None = None
         self.monitor_available = False
+        self._monitor_native_rate: int = SAMPLE_RATE
 
     # ------------------------------------------------------------------
     # Callbacks (called from sounddevice's internal thread)
@@ -79,8 +110,12 @@ class AudioCapture:
     def _monitor_callback(self, indata, frames, time_info, status):
         if status:
             logger.debug("Monitor status: %s", status)
+        audio = indata[:, 0].copy()
+        if self._monitor_native_rate != SAMPLE_RATE:
+            g = gcd(self._monitor_native_rate, SAMPLE_RATE)
+            audio = resample_poly(audio, SAMPLE_RATE // g, self._monitor_native_rate // g).astype(np.float32)
         with self._lock:
-            self._mon_buf.append(indata[:, 0].copy())
+            self._mon_buf.append(audio)
 
     # ------------------------------------------------------------------
     # Chunk delivery thread
@@ -170,18 +205,20 @@ class AudioCapture:
         monitor_device = find_monitor_device()
         if monitor_device is not None:
             try:
+                native_rate = int(sd.query_devices(monitor_device)["default_samplerate"])
+                self._monitor_native_rate = native_rate
                 mon_stream = sd.InputStream(
                     device=monitor_device,
-                    samplerate=SAMPLE_RATE,
+                    samplerate=native_rate,
                     channels=CHANNELS,
                     dtype="float32",
                     callback=self._monitor_callback,
-                    blocksize=int(SAMPLE_RATE * 0.5),
+                    blocksize=int(native_rate * 0.5),
                 )
                 mon_stream.start()
                 self._streams.append(mon_stream)
                 self.monitor_available = True
-                logger.info("Monitor stream started")
+                logger.info("Monitor stream started at %dHz (resampling to %dHz)", native_rate, SAMPLE_RATE)
             except Exception as e:
                 logger.warning("Could not open monitor stream: %s — only mic will be captured", e)
         else:

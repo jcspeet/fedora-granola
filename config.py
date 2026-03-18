@@ -15,9 +15,17 @@ WHISPER_MODEL = os.environ.get("GRANOLA_MODEL", "base")
 WHISPER_DEVICE = "auto"    # auto, cpu, cuda
 WHISPER_COMPUTE_TYPE = "int8"  # int8 for CPU, float16 for CUDA
 
-# --- Claude ---
+# --- LLM Provider ---
+# Set GRANOLA_PROVIDER to "openai" to use OpenAI instead of Anthropic
+LLM_PROVIDER = os.environ.get("GRANOLA_PROVIDER", "anthropic").lower()
+
+# --- Anthropic / Claude ---
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = "claude-sonnet-4-6"
+
+# --- OpenAI ---
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("GRANOLA_OPENAI_MODEL", "gpt-4o")
 
 SUMMARY_SYSTEM_PROMPT = """\
 You are an expert meeting note-taker. Given a raw transcript, produce clean, \
@@ -38,11 +46,14 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_DIR = Path.home() / ".config" / "fedora-granola"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# Load key from config file if not in env
+# Load keys from config file if not in env
 _config_env = CONFIG_DIR / "config.env"
-if not ANTHROPIC_API_KEY and _config_env.exists():
+if _config_env.exists():
     for line in _config_env.read_text().splitlines():
         line = line.strip()
-        if line.startswith("ANTHROPIC_API_KEY="):
+        if not ANTHROPIC_API_KEY and line.startswith("ANTHROPIC_API_KEY="):
             ANTHROPIC_API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-            break
+        elif not OPENAI_API_KEY and line.startswith("OPENAI_API_KEY="):
+            OPENAI_API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
+        elif line.startswith("GRANOLA_PROVIDER="):
+            LLM_PROVIDER = line.split("=", 1)[1].strip().strip('"').strip("'").lower()

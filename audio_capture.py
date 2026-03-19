@@ -83,11 +83,14 @@ class AudioCapture:
     delivers CHUNK_SECONDS-long numpy float32 arrays to on_chunk().
     """
 
-    def __init__(self, on_chunk):
+    def __init__(self, on_chunk, on_level=None):
         """
         on_chunk: callable(np.ndarray) — receives mixed audio chunks at 16kHz mono.
+        on_level: callable(float, float) — called with (mic_rms, monitor_rms) on each
+                  audio callback, suitable for driving a level meter / waveform display.
         """
         self.on_chunk = on_chunk
+        self.on_level = on_level
         self._lock = threading.Lock()
         self._mic_buf: list[np.ndarray] = []
         self._mon_buf: list[np.ndarray] = []
@@ -96,6 +99,8 @@ class AudioCapture:
         self._chunk_thread: threading.Thread | None = None
         self.monitor_available = False
         self._monitor_native_rate: int = SAMPLE_RATE
+        self._last_mic_rms: float = 0.0
+        self._last_mon_rms: float = 0.0
 
     # ------------------------------------------------------------------
     # Callbacks (called from sounddevice's internal thread)
@@ -104,13 +109,20 @@ class AudioCapture:
     def _mic_callback(self, indata, frames, time_info, status):
         if status:
             logger.debug("Mic status: %s", status)
+        audio = indata[:, 0].copy()
+        self._last_mic_rms = float(np.sqrt(np.mean(audio ** 2)))
+        if self.on_level:
+            self.on_level(self._last_mic_rms, self._last_mon_rms)
         with self._lock:
-            self._mic_buf.append(indata[:, 0].copy())
+            self._mic_buf.append(audio)
 
     def _monitor_callback(self, indata, frames, time_info, status):
         if status:
             logger.debug("Monitor status: %s", status)
         audio = indata[:, 0].copy()
+        self._last_mon_rms = float(np.sqrt(np.mean(audio ** 2)))
+        if self.on_level:
+            self.on_level(self._last_mic_rms, self._last_mon_rms)
         if self._monitor_native_rate != SAMPLE_RATE:
             g = gcd(self._monitor_native_rate, SAMPLE_RATE)
             audio = resample_poly(audio, SAMPLE_RATE // g, self._monitor_native_rate // g).astype(np.float32)

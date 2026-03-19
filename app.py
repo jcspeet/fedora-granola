@@ -2,6 +2,7 @@
 Fedora Granola — GTK4 / libadwaita UI
 """
 
+import collections
 import datetime
 import logging
 import os
@@ -79,6 +80,11 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._summary_header_buf: list[str] = []
         self._title_found = False
 
+        # Waveform data: rolling history of (mic_rms, mon_rms) samples
+        self._waveform_history: collections.deque = collections.deque(maxlen=200)
+        self._waveform_mic_rms: float = 0.0
+        self._waveform_mon_rms: float = 0.0
+
         self._build_ui()
         self._setup_backend()
         self._refresh_meeting_list()
@@ -113,6 +119,13 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._save_btn.set_sensitive(False)
         self._save_btn.connect("clicked", self._on_save_clicked)
         header.pack_end(self._save_btn)
+
+        # Waveform bar
+        self._waveform = Gtk.DrawingArea()
+        self._waveform.set_height_request(48)
+        self._waveform.set_hexpand(True)
+        self._waveform.set_draw_func(self._draw_waveform)
+        toolbar_view.add_top_bar(self._waveform)
 
         # Outer horizontal paned: sidebar | content
         outer_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -236,6 +249,56 @@ class GranolaWindow(Adw.ApplicationWindow):
         return paned
 
     # ------------------------------------------------------------------
+    # Waveform
+    # ------------------------------------------------------------------
+
+    def _draw_waveform(self, area, cr, width, height):
+        # Background
+        cr.set_source_rgb(0.08, 0.08, 0.08)
+        cr.rectangle(0, 0, width, height)
+        cr.fill()
+
+        if not self._waveform_history:
+            return
+
+        samples = list(self._waveform_history)
+        n = len(samples)
+        bar_w = max(1.0, width / len(self._waveform_history.maxlen))
+        half = height / 2.0
+
+        for i, (mic, mon) in enumerate(samples):
+            x = (i / len(self._waveform_history.maxlen)) * width
+
+            # Mic — green, drawn upward from centre
+            mic_h = min(mic * height * 4, half)
+            cr.set_source_rgba(0.2, 0.85, 0.4, 0.9)
+            cr.rectangle(x, half - mic_h, bar_w - 0.5, mic_h)
+            cr.fill()
+
+            # System audio — blue, drawn downward from centre
+            mon_h = min(mon * height * 4, half)
+            cr.set_source_rgba(0.3, 0.6, 1.0, 0.9)
+            cr.rectangle(x, half, bar_w - 0.5, mon_h)
+            cr.fill()
+
+        # Centre line
+        cr.set_source_rgba(1, 1, 1, 0.15)
+        cr.set_line_width(1)
+        cr.move_to(0, half)
+        cr.line_to(width, half)
+        cr.stroke()
+
+    def _on_audio_level(self, mic_rms: float, mon_rms: float):
+        self._waveform_mic_rms = mic_rms
+        self._waveform_mon_rms = mon_rms
+        GLib.idle_add(self._ui_push_waveform_sample, mic_rms, mon_rms)
+
+    def _ui_push_waveform_sample(self, mic_rms: float, mon_rms: float):
+        self._waveform_history.append((mic_rms, mon_rms))
+        self._waveform.queue_draw()
+        return False
+
+    # ------------------------------------------------------------------
     # Backend setup
     # ------------------------------------------------------------------
 
@@ -246,7 +309,10 @@ class GranolaWindow(Adw.ApplicationWindow):
             on_error=self._on_transcriber_error,
         )
         self._transcriber.start()
-        self._capture = AudioCapture(on_chunk=self._on_audio_chunk)
+        self._capture = AudioCapture(
+            on_chunk=self._on_audio_chunk,
+            on_level=self._on_audio_level,
+        )
 
     # ------------------------------------------------------------------
     # Meeting list
@@ -410,6 +476,8 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._recording = False
         self._update_record_button()
         self._capture.stop()
+        self._waveform_history.clear()
+        self._waveform.queue_draw()
         self._set_status(
             f"Recording stopped. {len(self._transcript_parts)} segments transcribed."
         )

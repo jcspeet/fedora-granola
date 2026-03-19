@@ -28,8 +28,11 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("GRANOLA_OPENAI_MODEL", "gpt-4o")
 
 SUMMARY_SYSTEM_PROMPT = """\
-You are an expert meeting note-taker. Given a raw transcript, produce clean, \
-structured meeting notes in Markdown with these sections:
+You are an expert meeting note-taker. Given a raw transcript, your response \
+MUST begin with exactly this line (replace the angle-bracket placeholder):
+Title: <3-6 word meeting title>
+
+Then a blank line, then clean structured meeting notes in Markdown with these sections:
 - **Summary** (2-3 sentences)
 - **Key Points** (bullet list)
 - **Action Items** (bullet list with owner if mentioned, else "?")

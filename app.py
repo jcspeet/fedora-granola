@@ -122,7 +122,7 @@ class GranolaWindow(Adw.ApplicationWindow):
 
         # Waveform bar
         self._waveform = Gtk.DrawingArea()
-        self._waveform.set_height_request(48)
+        self._waveform.set_size_request(-1, 48)
         self._waveform.set_hexpand(True)
         self._waveform.set_draw_func(self._draw_waveform)
         toolbar_view.add_top_bar(self._waveform)
@@ -263,11 +263,11 @@ class GranolaWindow(Adw.ApplicationWindow):
 
         samples = list(self._waveform_history)
         n = len(samples)
-        bar_w = max(1.0, width / len(self._waveform_history.maxlen))
+        bar_w = max(1.0, width / self._waveform_history.maxlen)
         half = height / 2.0
 
         for i, (mic, mon) in enumerate(samples):
-            x = (i / len(self._waveform_history.maxlen)) * width
+            x = (i / self._waveform_history.maxlen) * width
 
             # Mic — green, drawn upward from centre
             mic_h = min(mic * height * 4, half)

@@ -42,6 +42,12 @@ Be concise. Do not pad or repeat. If the transcript is short or unclear, \
 do your best with what's there.\
 """
 
+CHAT_SYSTEM_PROMPT = """\
+You are a helpful assistant with access to meeting notes and transcripts. \
+Answer questions accurately based on the provided context. \
+If the answer isn't in the context, say so clearly.\
+"""
+
 # --- Storage ---
 DATA_DIR = Path.home() / ".local" / "share" / "fedora-granola"
 DATA_DIR.mkdir(parents=True, exist_ok=True)

@@ -15,7 +15,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 from audio_capture import AudioCapture
-from config import DATA_DIR
+from chat import Chatter
+from config import DATA_DIR, CHAT_SYSTEM_PROMPT
 from summarizer import Summarizer
 from transcriber import Transcriber
 
@@ -85,6 +86,11 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._waveform_mic_rms: float = 0.0
         self._waveform_mon_rms: float = 0.0
 
+        # Chat state
+        self._chat_history: list[dict] = []
+        self._chat_mode: str = "meeting"  # "meeting" or "global"
+        self._chat_streaming: bool = False
+
         self._build_ui()
         self._setup_backend()
         self._refresh_meeting_list()
@@ -107,6 +113,18 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._record_btn.connect("clicked", self._on_record_clicked)
         header.pack_start(self._record_btn)
         self._update_record_button()
+
+        # Notes / Chat toggle
+        seg_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        seg_box.add_css_class("linked")
+        self._notes_btn = Gtk.ToggleButton(label="Notes")
+        self._notes_btn.set_active(True)
+        self._chat_btn = Gtk.ToggleButton(label="Chat")
+        self._chat_btn.set_group(self._notes_btn)
+        seg_box.append(self._notes_btn)
+        seg_box.append(self._chat_btn)
+        header.set_title_widget(seg_box)
+        self._chat_btn.connect("notify::active", self._on_view_toggle)
 
         self._summarize_btn = Gtk.Button(label="Summarize")
         self._summarize_btn.set_css_classes(["pill"])
@@ -137,7 +155,13 @@ class GranolaWindow(Adw.ApplicationWindow):
         toolbar_view.set_content(outer_paned)
 
         outer_paned.set_start_child(self._build_sidebar())
-        outer_paned.set_end_child(self._build_content())
+
+        self._content_stack = Gtk.Stack()
+        self._content_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self._content_stack.set_transition_duration(150)
+        self._content_stack.add_named(self._build_content(), "notes")
+        self._content_stack.add_named(self._build_chat_panel(), "chat")
+        outer_paned.set_end_child(self._content_stack)
 
         # Status bar
         self._status_bar = Gtk.Label(label="Loading Whisper model…")
@@ -172,6 +196,14 @@ class GranolaWindow(Adw.ApplicationWindow):
         new_btn.set_margin_bottom(8)
         new_btn.connect("clicked", self._on_new_recording_clicked)
         sidebar_box.append(new_btn)
+
+        global_chat_btn = Gtk.Button(label="Chat: All Meetings")
+        global_chat_btn.set_css_classes(["flat"])
+        global_chat_btn.set_margin_start(8)
+        global_chat_btn.set_margin_end(8)
+        global_chat_btn.set_margin_bottom(4)
+        global_chat_btn.connect("clicked", self._on_global_chat_clicked)
+        sidebar_box.append(global_chat_btn)
 
         sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         sidebar_box.append(sep)
@@ -363,6 +395,10 @@ class GranolaWindow(Adw.ApplicationWindow):
         self.set_title(f"Fedora Granola — {title}")
         self._set_ui_editable(False)
         self._set_status(f"Viewing: {title}  ({dt.strftime('%b %d, %Y')})")
+        self._chat_mode = "meeting"
+        self._clear_chat()
+        self._chat_entry.set_placeholder_text("Ask something about this meeting…")
+        self._notes_btn.set_active(True)
 
     # ------------------------------------------------------------------
     # New recording
@@ -381,6 +417,10 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._summary_buf.set_text("")
         self._session_start = None
         self._meeting_list.unselect_all()
+        self._chat_mode = "meeting"
+        self._clear_chat()
+        self._chat_entry.set_placeholder_text("Ask something about this meeting…")
+        self._notes_btn.set_active(True)
         self._set_ui_editable(True)
         self._record_btn.set_sensitive(self._transcriber_ready)
         self._summarize_btn.set_sensitive(False)
@@ -576,6 +616,152 @@ class GranolaWindow(Adw.ApplicationWindow):
         dialog = Adw.AlertDialog(heading=title, body=msg)
         dialog.add_response("ok", "OK")
         dialog.present(self)
+        return False
+
+    # ------------------------------------------------------------------
+    # Chat panel
+    # ------------------------------------------------------------------
+
+    def _build_chat_panel(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        self._chat_view = Gtk.TextView()
+        self._chat_view.set_editable(False)
+        self._chat_view.set_wrap_mode(Gtk.WrapMode.WORD)
+        self._chat_view.set_margin_start(12)
+        self._chat_view.set_margin_end(12)
+        self._chat_view.set_margin_top(8)
+        self._chat_view.set_margin_bottom(8)
+        self._chat_buf = self._chat_view.get_buffer()
+        self._chat_end_mark = self._chat_buf.create_mark(
+            "chat-end", self._chat_buf.get_end_iter(), left_gravity=False
+        )
+        scroll.set_child(self._chat_view)
+        box.append(scroll)
+
+        input_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        input_row.set_margin_start(12)
+        input_row.set_margin_end(12)
+        input_row.set_margin_top(4)
+        input_row.set_margin_bottom(8)
+
+        self._chat_entry = Gtk.Entry()
+        self._chat_entry.set_hexpand(True)
+        self._chat_entry.set_placeholder_text("Ask something about this meeting…")
+        self._chat_entry.connect("activate", self._on_chat_send)
+        input_row.append(self._chat_entry)
+
+        self._send_btn = Gtk.Button(label="Send")
+        self._send_btn.set_css_classes(["suggested-action"])
+        self._send_btn.connect("clicked", self._on_chat_send)
+        input_row.append(self._send_btn)
+
+        box.append(input_row)
+        return box
+
+    def _on_view_toggle(self, btn, _param):
+        if self._chat_btn.get_active():
+            self._content_stack.set_visible_child_name("chat")
+            self._chat_entry.grab_focus()
+        else:
+            self._content_stack.set_visible_child_name("notes")
+
+    def _on_global_chat_clicked(self, btn):
+        self._chat_mode = "global"
+        self._meeting_list.unselect_all()
+        self._clear_chat()
+        self._chat_entry.set_placeholder_text("Ask something across all meetings…")
+        self._chat_btn.set_active(True)
+        self._set_status("Chat: All Meetings")
+
+    def _clear_chat(self):
+        self._chat_history = []
+        self._chat_buf.set_text("")
+
+    def _build_meeting_context(self) -> str:
+        transcript = self._get_full_transcript()
+        notes = self._summary_buf.get_text(
+            self._summary_buf.get_start_iter(),
+            self._summary_buf.get_end_iter(),
+            False,
+        )
+        parts = []
+        if notes.strip():
+            parts.append(f"## Meeting Notes\n{notes.strip()}")
+        if transcript.strip():
+            parts.append(f"## Raw Transcript\n{transcript.strip()}")
+        return "\n\n".join(parts)
+
+    def _build_global_context(self) -> str:
+        paths = sorted(DATA_DIR.glob("meeting_*.md"), reverse=True)
+        chunks = []
+        for path in paths:
+            title, dt, transcript, summary = _parse_meeting_file(path)
+            chunk = f"### {title} ({dt.strftime('%Y-%m-%d')})\n"
+            if summary:
+                chunk += summary[:800]
+            chunks.append(chunk)
+        return "All meeting notes:\n\n" + "\n\n".join(chunks) if chunks else ""
+
+    def _on_chat_send(self, widget):
+        if self._chat_streaming:
+            return
+        text = self._chat_entry.get_text().strip()
+        if not text:
+            return
+
+        self._chat_entry.set_text("")
+        self._send_btn.set_sensitive(False)
+        self._chat_entry.set_sensitive(False)
+        self._chat_streaming = True
+
+        # Inject context into first message only
+        if not self._chat_history:
+            ctx = (self._build_global_context() if self._chat_mode == "global"
+                   else self._build_meeting_context())
+            user_content = f"Context:\n{ctx}\n\n---\n\n{text}" if ctx else text
+        else:
+            user_content = text
+
+        self._chat_history.append({"role": "user", "content": user_content})
+        self._append_chat("You: " + text + "\n")
+        self._append_chat("Assistant: ")
+
+        chatter = Chatter(
+            on_token=lambda t: GLib.idle_add(self._ui_chat_token, t),
+            on_complete=lambda s: GLib.idle_add(self._ui_chat_done, s),
+            on_error=lambda e: GLib.idle_add(self._ui_chat_error, e),
+        )
+        chatter.chat(list(self._chat_history), CHAT_SYSTEM_PROMPT)
+
+    def _append_chat(self, text: str):
+        end_iter = self._chat_buf.get_end_iter()
+        self._chat_buf.insert(end_iter, text)
+        self._chat_buf.move_mark(self._chat_end_mark, self._chat_buf.get_end_iter())
+        self._chat_view.scroll_mark_onscreen(self._chat_end_mark)
+
+    def _ui_chat_token(self, token: str):
+        self._append_chat(token)
+        return False
+
+    def _ui_chat_done(self, full_response: str):
+        self._chat_history.append({"role": "assistant", "content": full_response})
+        self._append_chat("\n\n")
+        self._send_btn.set_sensitive(True)
+        self._chat_entry.set_sensitive(True)
+        self._chat_streaming = False
+        self._chat_entry.grab_focus()
+        return False
+
+    def _ui_chat_error(self, msg: str):
+        self._append_chat(f"\n[Error: {msg}]\n\n")
+        self._send_btn.set_sensitive(True)
+        self._chat_entry.set_sensitive(True)
+        self._chat_streaming = False
         return False
 
     def do_close_request(self):

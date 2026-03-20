@@ -20,60 +20,72 @@ from config import SAMPLE_RATE, CHANNELS, CHUNK_SECONDS, MIC_GAIN, MONITOR_GAIN
 logger = logging.getLogger(__name__)
 
 
-def find_monitor_device() -> int | None:
+def find_monitor_source() -> str | int | None:
     """
-    Find the PulseAudio/PipeWire monitor source for the default sink.
-    Returns the sounddevice device index, or None if not found.
+    Find the system audio monitor source for the current default output device.
+    Returns a sounddevice device index, or None if not found.
+    Works with speakers, Bluetooth headphones, etc.
     """
     try:
         devices = sd.query_devices()
 
-        # 1. Prefer Easy Effects Sink monitor (captures post-EQ system audio)
-        for i, dev in enumerate(devices):
-            if "easy effects sink" in dev["name"].lower() and dev["max_input_channels"] > 0:
-                logger.info("Found Easy Effects monitor: %s (index %d)", dev["name"], i)
-                return i
+        # 1. Prefer Easy Effects sink monitor (post-EQ audio)
+        sources_result = subprocess.run(
+            ["pactl", "list", "sources", "short"],
+            capture_output=True, text=True, timeout=3
+        )
+        if "easyeffects_sink.monitor" in sources_result.stdout:
+            for i, dev in enumerate(devices):
+                if "easy effects sink" in dev["name"].lower() and dev["max_input_channels"] > 0:
+                    logger.info("Found Easy Effects monitor (index %d)", i)
+                    return i
 
-        # 2. Get the default sink and find its monitor description via pactl
-        result = subprocess.run(
+        # 2. Get the default sink description from pactl
+        sink_result = subprocess.run(
             ["pactl", "get-default-sink"],
             capture_output=True, text=True, timeout=3
         )
-        default_sink = result.stdout.strip()
-        monitor_source_name = f"{default_sink}.monitor"
+        default_sink = sink_result.stdout.strip()
 
-        sources_result = subprocess.run(
-            ["pactl", "list", "sources"],
+        # Get the sink's human-readable description
+        sinks_result = subprocess.run(
+            ["pactl", "list", "sinks"],
             capture_output=True, text=True, timeout=3
         )
-        description = None
+        sink_description = None
         current_name = None
-        for line in sources_result.stdout.splitlines():
+        for line in sinks_result.stdout.splitlines():
             line = line.strip()
             if line.startswith("Name:"):
                 current_name = line.split(":", 1)[1].strip()
-            elif line.startswith("Description:") and current_name == monitor_source_name:
-                description = line.split(":", 1)[1].strip()
+            elif line.startswith("Description:") and current_name == default_sink:
+                sink_description = line.split(":", 1)[1].strip()
                 break
 
-        if description:
-            # Description is e.g. "Monitor of Meteor Lake-P HD Audio Controller Speaker"
-            # Strip the "Monitor of " prefix to get the device name
-            device_label = description.lower().removeprefix("monitor of ")
+        if sink_description:
+            desc_lower = sink_description.lower()
+            words = [w for w in desc_lower.split() if len(w) > 3]
+
+            def is_monitor(dev):
+                # PipeWire monitors have equal input and output channel counts
+                return (dev["max_input_channels"] > 0
+                        and dev["max_input_channels"] == dev["max_output_channels"])
+
+            # Exact: description is substring of device name
             for i, dev in enumerate(devices):
-                if device_label in dev["name"].lower() and dev["max_input_channels"] > 0:
+                if is_monitor(dev) and desc_lower in dev["name"].lower():
                     logger.info("Found monitor by description: %s (index %d)", dev["name"], i)
                     return i
 
-        # 3. Fallback: find a Speaker output device that also accepts input (PipeWire monitor)
-        for i, dev in enumerate(devices):
-            name = dev["name"].lower()
-            if "speaker" in name and dev["max_input_channels"] > 0 and dev["max_output_channels"] > 0:
-                logger.info("Found monitor (speaker fallback): %s (index %d)", dev["name"], i)
-                return i
+            # Fuzzy: at least 2 significant words match
+            for i, dev in enumerate(devices):
+                name = dev["name"].lower()
+                if is_monitor(dev) and sum(w in name for w in words) >= 2:
+                    logger.info("Found monitor by fuzzy match: %s (index %d)", dev["name"], i)
+                    return i
 
     except Exception as e:
-        logger.warning("Could not find monitor device: %s", e)
+        logger.warning("Could not find monitor source: %s", e)
     return None
 
 
@@ -214,13 +226,13 @@ class AudioCapture:
             raise
 
         # System audio monitor stream
-        monitor_device = find_monitor_device()
-        if monitor_device is not None:
+        monitor_source = find_monitor_source()
+        if monitor_source is not None:
             try:
-                native_rate = int(sd.query_devices(monitor_device)["default_samplerate"])
+                native_rate = int(sd.query_devices(monitor_source)["default_samplerate"])
                 self._monitor_native_rate = native_rate
                 mon_stream = sd.InputStream(
-                    device=monitor_device,
+                    device=monitor_source,
                     samplerate=native_rate,
                     channels=CHANNELS,
                     dtype="float32",
@@ -230,11 +242,11 @@ class AudioCapture:
                 mon_stream.start()
                 self._streams.append(mon_stream)
                 self.monitor_available = True
-                logger.info("Monitor stream started at %dHz (resampling to %dHz)", native_rate, SAMPLE_RATE)
+                logger.info("Monitor stream started: %s at %dHz", monitor_source, native_rate)
             except Exception as e:
                 logger.warning("Could not open monitor stream: %s — only mic will be captured", e)
         else:
-            logger.warning("No monitor device found — only mic will be captured")
+            logger.warning("No monitor source found — only mic will be captured")
 
         self._chunk_thread = threading.Thread(target=self._chunk_loop, daemon=True)
         self._chunk_thread.start()

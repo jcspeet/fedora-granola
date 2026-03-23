@@ -16,6 +16,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 from audio_capture import AudioCapture
 from chat import Chatter
+import config
 from config import DATA_DIR, CHAT_SYSTEM_PROMPT
 from summarizer import Summarizer
 from transcriber import Transcriber
@@ -58,6 +59,113 @@ def _parse_meeting_file(path: Path) -> tuple[str, datetime.datetime, str, str]:
         dt = datetime.datetime.fromtimestamp(path.stat().st_mtime)
 
     return title, dt, transcript, summary
+
+
+# ---------------------------------------------------------------------------
+# Settings dialog
+# ---------------------------------------------------------------------------
+
+_PROVIDERS = ["Anthropic", "OpenAI", "Local (Ollama)"]
+_PROVIDER_KEYS = ["anthropic", "openai", "ollama"]
+
+
+class SettingsDialog(Adw.Window):
+    """Modal settings window for provider selection and credentials."""
+
+    def __init__(self, parent):
+        super().__init__()
+        self.set_transient_for(parent)
+        self.set_modal(True)
+        self.set_default_size(420, -1)
+        self.set_title("Settings")
+        self.set_resizable(False)
+
+        toolbar_view = Adw.ToolbarView()
+        self.set_content(toolbar_view)
+
+        header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(False)
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _: self.close())
+        header.pack_start(cancel_btn)
+        save_btn = Gtk.Button(label="Save")
+        save_btn.add_css_class("suggested-action")
+        save_btn.connect("clicked", self._on_save)
+        header.pack_end(save_btn)
+        toolbar_view.add_top_bar(header)
+
+        page = Adw.PreferencesPage()
+        toolbar_view.set_content(page)
+
+        group = Adw.PreferencesGroup(title="AI Provider")
+        page.add(group)
+
+        # Provider dropdown
+        self._provider_row = Adw.ComboRow(title="Provider")
+        provider_model = Gtk.StringList.new(_PROVIDERS)
+        self._provider_row.set_model(provider_model)
+        current = config.LLM_PROVIDER
+        idx = _PROVIDER_KEYS.index(current) if current in _PROVIDER_KEYS else 0
+        self._provider_row.set_selected(idx)
+        self._provider_row.connect("notify::selected", self._on_provider_changed)
+        group.add(self._provider_row)
+
+        # Credential / model entry
+        self._cred_row = Adw.EntryRow()
+        group.add(self._cred_row)
+
+        # Hint label
+        self._hint_label = Gtk.Label()
+        self._hint_label.set_margin_start(12)
+        self._hint_label.set_margin_end(12)
+        self._hint_label.set_margin_top(4)
+        self._hint_label.set_margin_bottom(8)
+        self._hint_label.set_xalign(0)
+        self._hint_label.add_css_class("caption")
+        self._hint_label.add_css_class("dim-label")
+        self._hint_label.set_wrap(True)
+        group.add(self._hint_label)
+
+        self._refresh_cred_row(idx)
+
+    def _refresh_cred_row(self, provider_idx: int):
+        if provider_idx == 0:  # Anthropic
+            self._cred_row.set_title("Anthropic API Key")
+            self._cred_row.set_text(config.ANTHROPIC_API_KEY)
+            self._cred_row.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+            self._hint_label.set_label("Get a key at console.anthropic.com")
+        elif provider_idx == 1:  # OpenAI
+            self._cred_row.set_title("OpenAI API Key")
+            self._cred_row.set_text(config.OPENAI_API_KEY)
+            self._cred_row.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+            self._hint_label.set_label("Get a key at platform.openai.com")
+        else:  # Ollama
+            self._cred_row.set_title("Ollama Model")
+            self._cred_row.set_text(config.OLLAMA_MODEL)
+            self._cred_row.set_input_purpose(Gtk.InputPurpose.FREE_FORM)
+            self._hint_label.set_label(
+                "Model name to use, e.g. llama3.1 or mistral-nemo.\n"
+                "Install Ollama from ollama.com, then run: ollama pull llama3.1"
+            )
+
+    def _on_provider_changed(self, row, _param):
+        self._refresh_cred_row(row.get_selected())
+
+    def _on_save(self, _btn):
+        provider_idx = self._provider_row.get_selected()
+        provider = _PROVIDER_KEYS[provider_idx]
+        value = self._cred_row.get_text().strip()
+
+        config.save_setting("GRANOLA_PROVIDER", provider)
+
+        if provider == "anthropic":
+            config.save_setting("ANTHROPIC_API_KEY", value)
+        elif provider == "openai":
+            config.save_setting("OPENAI_API_KEY", value)
+        else:
+            config.save_setting("EATMO_OLLAMA_MODEL", value)
+
+        self.close()
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +233,12 @@ class GranolaWindow(Adw.ApplicationWindow):
         seg_box.append(self._chat_btn)
         header.set_title_widget(seg_box)
         self._chat_btn.connect("notify::active", self._on_view_toggle)
+
+        settings_btn = Gtk.Button()
+        settings_btn.set_icon_name("preferences-system-symbolic")
+        settings_btn.set_tooltip_text("Settings")
+        settings_btn.connect("clicked", self._on_settings_clicked)
+        header.pack_end(settings_btn)
 
         self._summarize_btn = Gtk.Button(label="Summarize")
         self._summarize_btn.set_css_classes(["pill"])
@@ -489,6 +603,10 @@ class GranolaWindow(Adw.ApplicationWindow):
     # Button handlers
     # ------------------------------------------------------------------
 
+    def _on_settings_clicked(self, btn):
+        dlg = SettingsDialog(self)
+        dlg.present()
+
     def _on_record_clicked(self, btn):
         if not self._recording:
             self._start_recording()
@@ -779,7 +897,7 @@ class GranolaApp(Adw.Application):
 
     def __init__(self):
         super().__init__(
-            application_id="io.github.fedora-granola",
+            application_id="io.github.eatmo",
             flags=Gio.ApplicationFlags.DEFAULT_FLAGS,
         )
         self.connect("activate", self._on_activate)

@@ -110,9 +110,13 @@ class SettingsDialog(Adw.Window):
         self._provider_row.connect("notify::selected", self._on_provider_changed)
         group.add(self._provider_row)
 
-        # Credential / model entry
-        self._cred_row = Adw.EntryRow()
-        group.add(self._cred_row)
+        # API key row (masked) — for Anthropic and OpenAI
+        self._key_row = Adw.PasswordEntryRow()
+        group.add(self._key_row)
+
+        # Model name row (plain text) — for Ollama
+        self._model_row = Adw.EntryRow(title="Ollama Model")
+        group.add(self._model_row)
 
         # Hint label
         self._hint_label = Gtk.Label()
@@ -130,19 +134,21 @@ class SettingsDialog(Adw.Window):
 
     def _refresh_cred_row(self, provider_idx: int):
         if provider_idx == 0:  # Anthropic
-            self._cred_row.set_title("Anthropic API Key")
-            self._cred_row.set_text(config.ANTHROPIC_API_KEY)
-            self._cred_row.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+            self._key_row.set_title("Anthropic API Key")
+            self._key_row.set_text(config.ANTHROPIC_API_KEY)
+            self._key_row.set_visible(True)
+            self._model_row.set_visible(False)
             self._hint_label.set_label("Get a key at console.anthropic.com")
         elif provider_idx == 1:  # OpenAI
-            self._cred_row.set_title("OpenAI API Key")
-            self._cred_row.set_text(config.OPENAI_API_KEY)
-            self._cred_row.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+            self._key_row.set_title("OpenAI API Key")
+            self._key_row.set_text(config.OPENAI_API_KEY)
+            self._key_row.set_visible(True)
+            self._model_row.set_visible(False)
             self._hint_label.set_label("Get a key at platform.openai.com")
         else:  # Ollama
-            self._cred_row.set_title("Ollama Model")
-            self._cred_row.set_text(config.OLLAMA_MODEL)
-            self._cred_row.set_input_purpose(Gtk.InputPurpose.FREE_FORM)
+            self._key_row.set_visible(False)
+            self._model_row.set_text(config.OLLAMA_MODEL)
+            self._model_row.set_visible(True)
             self._hint_label.set_label(
                 "Model name to use, e.g. llama3.1 or mistral-nemo.\n"
                 "Install Ollama from ollama.com, then run: ollama pull llama3.1"
@@ -154,7 +160,8 @@ class SettingsDialog(Adw.Window):
     def _on_save(self, _btn):
         provider_idx = self._provider_row.get_selected()
         provider = _PROVIDER_KEYS[provider_idx]
-        value = self._cred_row.get_text().strip()
+        value = (self._model_row.get_text() if provider == "ollama"
+                 else self._key_row.get_text()).strip()
 
         config.save_setting("GRANOLA_PROVIDER", provider)
 

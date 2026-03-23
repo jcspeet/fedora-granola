@@ -21,11 +21,11 @@ LLM_PROVIDER = os.environ.get("GRANOLA_PROVIDER", "anthropic").lower()
 
 # --- Anthropic / Claude ---
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = os.environ.get("EATMO_ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 # --- OpenAI ---
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("GRANOLA_OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.environ.get("EATMO_OPENAI_MODEL", "gpt-4o")
 
 # --- Local (Ollama) ---
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
@@ -70,6 +70,10 @@ if _config_env.exists():
             OPENAI_API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
         elif line.startswith("GRANOLA_PROVIDER="):
             LLM_PROVIDER = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+        elif line.startswith("EATMO_ANTHROPIC_MODEL="):
+            CLAUDE_MODEL = line.split("=", 1)[1].strip().strip('"').strip("'")
+        elif line.startswith("EATMO_OPENAI_MODEL="):
+            OPENAI_MODEL = line.split("=", 1)[1].strip().strip('"').strip("'")
         elif line.startswith("EATMO_OLLAMA_MODEL="):
             OLLAMA_MODEL = line.split("=", 1)[1].strip().strip('"').strip("'")
 

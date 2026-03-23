@@ -68,9 +68,39 @@ def _parse_meeting_file(path: Path) -> tuple[str, datetime.datetime, str, str]:
 _PROVIDERS = ["Anthropic", "OpenAI", "Local (Ollama)"]
 _PROVIDER_KEYS = ["anthropic", "openai", "ollama"]
 
+# OpenAI model IDs that are not chat models
+_OPENAI_EXCLUDED = (
+    "text-embedding", "dall-e", "whisper", "tts",
+    "babbage", "davinci", "ada", "curie",
+)
+
+
+def _fetch_models_bg(provider: str, key: str) -> list[str]:
+    """Fetch available model IDs. Runs in a background thread; returns [] on error."""
+    try:
+        if provider == "anthropic":
+            import anthropic
+            client = anthropic.Anthropic(api_key=key)
+            return [m.id for m in client.models.list().data]
+        elif provider == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=key)
+            all_models = client.models.list().data
+            return sorted(
+                m.id for m in all_models
+                if not any(m.id.startswith(p) for p in _OPENAI_EXCLUDED)
+            )
+        else:  # ollama
+            from openai import OpenAI
+            client = OpenAI(api_key="ollama", base_url=config.OLLAMA_BASE_URL)
+            return [m.id for m in client.models.list().data]
+    except Exception as e:
+        logger.warning("Could not fetch models for %s: %s", provider, e)
+        return []
+
 
 class SettingsDialog(Adw.Window):
-    """Modal settings window for provider selection and credentials."""
+    """Modal settings window for provider selection, credentials, and model choice."""
 
     def __init__(self, parent):
         super().__init__()
@@ -80,6 +110,8 @@ class SettingsDialog(Adw.Window):
         self.set_title("Settings")
         self.set_resizable(False)
 
+        self._fetched_models: list[str] = []
+
         toolbar_view = Adw.ToolbarView()
         self.set_content(toolbar_view)
 
@@ -88,10 +120,10 @@ class SettingsDialog(Adw.Window):
         cancel_btn = Gtk.Button(label="Cancel")
         cancel_btn.connect("clicked", lambda _: self.close())
         header.pack_start(cancel_btn)
-        save_btn = Gtk.Button(label="Save")
-        save_btn.add_css_class("suggested-action")
-        save_btn.connect("clicked", self._on_save)
-        header.pack_end(save_btn)
+        self._save_btn = Gtk.Button(label="Save")
+        self._save_btn.add_css_class("suggested-action")
+        self._save_btn.connect("clicked", self._on_save)
+        header.pack_end(self._save_btn)
         toolbar_view.add_top_bar(header)
 
         page = Adw.PreferencesPage()
@@ -102,21 +134,30 @@ class SettingsDialog(Adw.Window):
 
         # Provider dropdown
         self._provider_row = Adw.ComboRow(title="Provider")
-        provider_model = Gtk.StringList.new(_PROVIDERS)
-        self._provider_row.set_model(provider_model)
+        self._provider_row.set_model(Gtk.StringList.new(_PROVIDERS))
         current = config.LLM_PROVIDER
         idx = _PROVIDER_KEYS.index(current) if current in _PROVIDER_KEYS else 0
         self._provider_row.set_selected(idx)
         self._provider_row.connect("notify::selected", self._on_provider_changed)
         group.add(self._provider_row)
 
-        # API key row (masked) — for Anthropic and OpenAI
+        # API key row (masked) — hidden for Ollama
         self._key_row = Adw.PasswordEntryRow()
         group.add(self._key_row)
 
-        # Model name row (plain text) — for Ollama
-        self._model_row = Adw.EntryRow(title="Ollama Model")
-        group.add(self._model_row)
+        # Model selector
+        self._model_combo = Adw.ComboRow(title="Model")
+        self._model_spinner = Gtk.Spinner()
+        self._model_spinner.set_margin_top(4)
+        self._model_spinner.set_margin_bottom(4)
+        self._model_combo.add_suffix(self._model_spinner)
+        refresh_btn = Gtk.Button()
+        refresh_btn.set_icon_name("view-refresh-symbolic")
+        refresh_btn.add_css_class("flat")
+        refresh_btn.set_tooltip_text("Fetch available models")
+        refresh_btn.connect("clicked", self._on_refresh_clicked)
+        self._model_combo.add_suffix(refresh_btn)
+        group.add(self._model_combo)
 
         # Hint label
         self._hint_label = Gtk.Label()
@@ -130,47 +171,104 @@ class SettingsDialog(Adw.Window):
         self._hint_label.set_wrap(True)
         group.add(self._hint_label)
 
-        self._refresh_cred_row(idx)
+        self._apply_provider(idx, fetch=True)
 
-    def _refresh_cred_row(self, provider_idx: int):
-        if provider_idx == 0:  # Anthropic
+    # ------------------------------------------------------------------
+
+    def _current_model(self, provider: str) -> str:
+        if provider == "anthropic":
+            return config.CLAUDE_MODEL
+        elif provider == "openai":
+            return config.OPENAI_MODEL
+        return config.OLLAMA_MODEL
+
+    def _apply_provider(self, provider_idx: int, fetch: bool = False):
+        provider = _PROVIDER_KEYS[provider_idx]
+        if provider == "anthropic":
             self._key_row.set_title("Anthropic API Key")
             self._key_row.set_text(config.ANTHROPIC_API_KEY)
             self._key_row.set_visible(True)
-            self._model_row.set_visible(False)
             self._hint_label.set_label("Get a key at console.anthropic.com")
-        elif provider_idx == 1:  # OpenAI
+            if fetch and config.ANTHROPIC_API_KEY:
+                self._fetch_models(provider, config.ANTHROPIC_API_KEY)
+            else:
+                self._set_model_list([config.CLAUDE_MODEL])
+        elif provider == "openai":
             self._key_row.set_title("OpenAI API Key")
             self._key_row.set_text(config.OPENAI_API_KEY)
             self._key_row.set_visible(True)
-            self._model_row.set_visible(False)
             self._hint_label.set_label("Get a key at platform.openai.com")
-        else:  # Ollama
+            if fetch and config.OPENAI_API_KEY:
+                self._fetch_models(provider, config.OPENAI_API_KEY)
+            else:
+                self._set_model_list([config.OPENAI_MODEL])
+        else:  # ollama
             self._key_row.set_visible(False)
-            self._model_row.set_text(config.OLLAMA_MODEL)
-            self._model_row.set_visible(True)
             self._hint_label.set_label(
-                "Model name to use, e.g. llama3.1 or mistral-nemo.\n"
                 "Install Ollama from ollama.com, then run: ollama pull llama3.1"
             )
+            if fetch:
+                self._fetch_models(provider, "ollama")
+            else:
+                self._set_model_list([config.OLLAMA_MODEL])
+
+    def _fetch_models(self, provider: str, key: str):
+        self._model_spinner.start()
+        self._save_btn.set_sensitive(False)
+        self._model_combo.set_sensitive(False)
+
+        def _bg():
+            models = _fetch_models_bg(provider, key)
+            GLib.idle_add(self._ui_models_fetched, provider, models)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _ui_models_fetched(self, provider: str, models: list[str]):
+        self._model_spinner.stop()
+        self._save_btn.set_sensitive(True)
+        self._model_combo.set_sensitive(True)
+        if not models:
+            models = [self._current_model(provider)]
+        self._set_model_list(models, self._current_model(provider))
+        return False
+
+    def _set_model_list(self, models: list[str], current: str | None = None):
+        self._fetched_models = models
+        self._model_combo.set_model(Gtk.StringList.new(models))
+        target = current or (models[0] if models else "")
+        idx = models.index(target) if target in models else 0
+        self._model_combo.set_selected(idx)
 
     def _on_provider_changed(self, row, _param):
-        self._refresh_cred_row(row.get_selected())
+        self._apply_provider(row.get_selected(), fetch=False)
+
+    def _on_refresh_clicked(self, _btn):
+        provider_idx = self._provider_row.get_selected()
+        provider = _PROVIDER_KEYS[provider_idx]
+        key = self._key_row.get_text().strip() if provider != "ollama" else "ollama"
+        if key:
+            self._fetch_models(provider, key)
 
     def _on_save(self, _btn):
         provider_idx = self._provider_row.get_selected()
         provider = _PROVIDER_KEYS[provider_idx]
-        value = (self._model_row.get_text() if provider == "ollama"
-                 else self._key_row.get_text()).strip()
 
         config.save_setting("GRANOLA_PROVIDER", provider)
 
         if provider == "anthropic":
-            config.save_setting("ANTHROPIC_API_KEY", value)
+            config.save_setting("ANTHROPIC_API_KEY", self._key_row.get_text().strip())
+            model_idx = self._model_combo.get_selected()
+            if self._fetched_models and model_idx < len(self._fetched_models):
+                config.save_setting("EATMO_ANTHROPIC_MODEL", self._fetched_models[model_idx])
         elif provider == "openai":
-            config.save_setting("OPENAI_API_KEY", value)
+            config.save_setting("OPENAI_API_KEY", self._key_row.get_text().strip())
+            model_idx = self._model_combo.get_selected()
+            if self._fetched_models and model_idx < len(self._fetched_models):
+                config.save_setting("EATMO_OPENAI_MODEL", self._fetched_models[model_idx])
         else:
-            config.save_setting("EATMO_OLLAMA_MODEL", value)
+            model_idx = self._model_combo.get_selected()
+            if self._fetched_models and model_idx < len(self._fetched_models):
+                config.save_setting("EATMO_OLLAMA_MODEL", self._fetched_models[model_idx])
 
         self.close()
 

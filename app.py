@@ -651,7 +651,9 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._transcript_view.set_editable(editable)
         self._summary_view.set_editable(editable)
         if not editable:
-            self._record_btn.set_sensitive(False)
+            # Never disable the record button while recording — user must be able to stop
+            if not self._recording:
+                self._record_btn.set_sensitive(False)
             self._summarize_btn.set_sensitive(False)
             self._save_btn.set_sensitive(False)
 

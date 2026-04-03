@@ -16,6 +16,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 from audio_capture import AudioCapture
 from chat import Chatter
+import config
 from config import DATA_DIR, CHAT_SYSTEM_PROMPT
 from summarizer import Summarizer
 from transcriber import Transcriber
@@ -58,6 +59,227 @@ def _parse_meeting_file(path: Path) -> tuple[str, datetime.datetime, str, str]:
         dt = datetime.datetime.fromtimestamp(path.stat().st_mtime)
 
     return title, dt, transcript, summary
+
+
+# ---------------------------------------------------------------------------
+# Settings dialog
+# ---------------------------------------------------------------------------
+
+_PROVIDERS = ["Anthropic", "OpenAI", "Local (Ollama)"]
+_PROVIDER_KEYS = ["anthropic", "openai", "ollama"]
+
+# OpenAI model IDs that are not chat models
+_OPENAI_EXCLUDED = (
+    "text-embedding", "dall-e", "whisper", "tts",
+    "babbage", "davinci", "ada", "curie",
+)
+
+
+def _fetch_models_bg(provider: str, key: str) -> list[str]:
+    """Fetch available model IDs. Runs in a background thread; returns [] on error."""
+    try:
+        if provider == "anthropic":
+            import anthropic
+            client = anthropic.Anthropic(api_key=key)
+            return [m.id for m in client.models.list().data]
+        elif provider == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=key)
+            all_models = client.models.list().data
+            return sorted(
+                m.id for m in all_models
+                if not any(m.id.startswith(p) for p in _OPENAI_EXCLUDED)
+            )
+        else:  # ollama
+            from openai import OpenAI
+            client = OpenAI(api_key="ollama", base_url=config.OLLAMA_BASE_URL)
+            return [m.id for m in client.models.list().data]
+    except Exception as e:
+        logger.warning("Could not fetch models for %s: %s", provider, e)
+        return []
+
+
+class SettingsDialog(Adw.Window):
+    """Modal settings window for provider selection, credentials, and model choice."""
+
+    def __init__(self, parent):
+        super().__init__()
+        self.set_transient_for(parent)
+        self.set_modal(True)
+        self.set_default_size(420, -1)
+        self.set_title("Settings")
+        self.set_resizable(False)
+
+        self._fetched_models: list[str] = []
+
+        toolbar_view = Adw.ToolbarView()
+        self.set_content(toolbar_view)
+
+        header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(False)
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _: self.close())
+        header.pack_start(cancel_btn)
+        self._save_btn = Gtk.Button(label="Save")
+        self._save_btn.add_css_class("suggested-action")
+        self._save_btn.connect("clicked", self._on_save)
+        header.pack_end(self._save_btn)
+        toolbar_view.add_top_bar(header)
+
+        page = Adw.PreferencesPage()
+        toolbar_view.set_content(page)
+
+        group = Adw.PreferencesGroup(title="AI Provider")
+        page.add(group)
+
+        # Provider dropdown
+        self._provider_row = Adw.ComboRow(title="Provider")
+        self._provider_row.set_model(Gtk.StringList.new(_PROVIDERS))
+        current = config.LLM_PROVIDER
+        idx = _PROVIDER_KEYS.index(current) if current in _PROVIDER_KEYS else 0
+        self._provider_row.set_selected(idx)
+        self._provider_row.connect("notify::selected", self._on_provider_changed)
+        group.add(self._provider_row)
+
+        # API key row (masked) — hidden for Ollama
+        self._key_row = Adw.PasswordEntryRow()
+        group.add(self._key_row)
+
+        # Model selector
+        self._model_combo = Adw.ComboRow(title="Model")
+        self._model_spinner = Gtk.Spinner()
+        self._model_spinner.set_margin_top(4)
+        self._model_spinner.set_margin_bottom(4)
+        self._model_combo.add_suffix(self._model_spinner)
+        refresh_btn = Gtk.Button()
+        refresh_btn.set_icon_name("view-refresh-symbolic")
+        refresh_btn.add_css_class("flat")
+        refresh_btn.set_tooltip_text("Fetch available models")
+        refresh_btn.connect("clicked", self._on_refresh_clicked)
+        self._model_combo.add_suffix(refresh_btn)
+        group.add(self._model_combo)
+
+        # Hint label
+        self._hint_label = Gtk.Label()
+        self._hint_label.set_margin_start(12)
+        self._hint_label.set_margin_end(12)
+        self._hint_label.set_margin_top(4)
+        self._hint_label.set_margin_bottom(8)
+        self._hint_label.set_xalign(0)
+        self._hint_label.add_css_class("caption")
+        self._hint_label.add_css_class("dim-label")
+        self._hint_label.set_wrap(True)
+        group.add(self._hint_label)
+
+        self._apply_provider(idx, fetch=True)
+
+    # ------------------------------------------------------------------
+
+    def _current_model(self, provider: str) -> str:
+        if provider == "anthropic":
+            return config.CLAUDE_MODEL
+        elif provider == "openai":
+            return config.OPENAI_MODEL
+        return config.OLLAMA_MODEL
+
+    def _apply_provider(self, provider_idx: int, fetch: bool = False):
+        provider = _PROVIDER_KEYS[provider_idx]
+        if provider == "anthropic":
+            self._key_row.set_title("Anthropic API Key")
+            self._key_row.set_text(config.ANTHROPIC_API_KEY)
+            self._key_row.set_visible(True)
+            self._hint_label.set_label("Get a key at console.anthropic.com")
+            if fetch and config.ANTHROPIC_API_KEY:
+                self._fetch_models(provider, config.ANTHROPIC_API_KEY)
+            else:
+                self._set_model_list([config.CLAUDE_MODEL])
+        elif provider == "openai":
+            self._key_row.set_title("OpenAI API Key")
+            self._key_row.set_text(config.OPENAI_API_KEY)
+            self._key_row.set_visible(True)
+            self._hint_label.set_label("Get a key at platform.openai.com")
+            if fetch and config.OPENAI_API_KEY:
+                self._fetch_models(provider, config.OPENAI_API_KEY)
+            else:
+                self._set_model_list([config.OPENAI_MODEL])
+        else:  # ollama
+            self._key_row.set_visible(False)
+            self._hint_label.set_label(
+                "Install Ollama from ollama.com, then run: ollama pull llama3.1"
+            )
+            if fetch:
+                self._fetch_models(provider, "ollama")
+            else:
+                self._set_model_list([config.OLLAMA_MODEL])
+
+    def _fetch_models(self, provider: str, key: str):
+        self._model_spinner.start()
+        self._save_btn.set_sensitive(False)
+        self._model_combo.set_sensitive(False)
+
+        def _bg():
+            models = _fetch_models_bg(provider, key)
+            GLib.idle_add(self._ui_models_fetched, provider, models)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _ui_models_fetched(self, provider: str, models: list[str]):
+        self._model_spinner.stop()
+        self._save_btn.set_sensitive(True)
+        self._model_combo.set_sensitive(True)
+        if not models:
+            models = [self._current_model(provider)]
+        self._set_model_list(models, self._current_model(provider))
+        return False
+
+    def _set_model_list(self, models: list[str], current: str | None = None):
+        self._fetched_models = models
+        self._model_combo.set_model(Gtk.StringList.new(models))
+        target = current or (models[0] if models else "")
+        idx = models.index(target) if target in models else 0
+        self._model_combo.set_selected(idx)
+
+    def _on_provider_changed(self, row, _param):
+        self._apply_provider(row.get_selected(), fetch=False)
+
+    def _on_refresh_clicked(self, _btn):
+        provider_idx = self._provider_row.get_selected()
+        provider = _PROVIDER_KEYS[provider_idx]
+        key = self._key_row.get_text().strip() if provider != "ollama" else "ollama"
+        if key:
+            self._fetch_models(provider, key)
+
+    def _on_save(self, _btn):
+        provider_idx = self._provider_row.get_selected()
+        provider = _PROVIDER_KEYS[provider_idx]
+
+        config.save_setting("GRANOLA_PROVIDER", provider)
+        config.LLM_PROVIDER = provider
+
+        if provider == "anthropic":
+            config.save_setting("ANTHROPIC_API_KEY", self._key_row.get_text().strip())
+            config.ANTHROPIC_API_KEY = self._key_row.get_text().strip()
+            model_idx = self._model_combo.get_selected()
+            if self._fetched_models and model_idx < len(self._fetched_models):
+                model = self._fetched_models[model_idx]
+                config.save_setting("EATMO_ANTHROPIC_MODEL", model)
+                config.CLAUDE_MODEL = model
+        elif provider == "openai":
+            config.save_setting("OPENAI_API_KEY", self._key_row.get_text().strip())
+            config.OPENAI_API_KEY = self._key_row.get_text().strip()
+            model_idx = self._model_combo.get_selected()
+            if self._fetched_models and model_idx < len(self._fetched_models):
+                model = self._fetched_models[model_idx]
+                config.save_setting("EATMO_OPENAI_MODEL", model)
+                config.OPENAI_MODEL = model
+        else:
+            model_idx = self._model_combo.get_selected()
+            if self._fetched_models and model_idx < len(self._fetched_models):
+                model = self._fetched_models[model_idx]
+                config.save_setting("EATMO_OLLAMA_MODEL", model)
+                config.OLLAMA_MODEL = model
+
+        self.close()
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +347,12 @@ class GranolaWindow(Adw.ApplicationWindow):
         seg_box.append(self._chat_btn)
         header.set_title_widget(seg_box)
         self._chat_btn.connect("notify::active", self._on_view_toggle)
+
+        settings_btn = Gtk.Button()
+        settings_btn.set_icon_name("preferences-system-symbolic")
+        settings_btn.set_tooltip_text("Settings")
+        settings_btn.connect("clicked", self._on_settings_clicked)
+        header.pack_end(settings_btn)
 
         self._summarize_btn = Gtk.Button(label="Summarize")
         self._summarize_btn.set_css_classes(["pill"])
@@ -394,6 +622,7 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._current_save_path = path
         self.set_title(f"Fedora Granola — {title}")
         self._set_ui_editable(False)
+        self._summarize_btn.set_sensitive(bool(transcript.strip()))
         self._set_status(f"Viewing: {title}  ({dt.strftime('%b %d, %Y')})")
         self._chat_mode = "meeting"
         self._clear_chat()
@@ -432,8 +661,9 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._transcript_view.set_editable(editable)
         self._summary_view.set_editable(editable)
         if not editable:
-            self._record_btn.set_sensitive(False)
-            self._summarize_btn.set_sensitive(False)
+            # Never disable the record button while recording — user must be able to stop
+            if not self._recording:
+                self._record_btn.set_sensitive(False)
             self._save_btn.set_sensitive(False)
 
     # ------------------------------------------------------------------
@@ -489,6 +719,10 @@ class GranolaWindow(Adw.ApplicationWindow):
     # Button handlers
     # ------------------------------------------------------------------
 
+    def _on_settings_clicked(self, btn):
+        dlg = SettingsDialog(self)
+        dlg.present()
+
     def _on_record_clicked(self, btn):
         if not self._recording:
             self._start_recording()
@@ -528,6 +762,28 @@ class GranolaWindow(Adw.ApplicationWindow):
             self._ui_show_error("Nothing to summarize", "The transcript is empty.")
             return
 
+        existing = self._summary_buf.get_text(
+            self._summary_buf.get_start_iter(),
+            self._summary_buf.get_end_iter(),
+            False,
+        ).strip()
+
+        if existing:
+            dialog = Adw.AlertDialog(
+                heading="Re-summarize?",
+                body="This will replace the existing summary.",
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("summarize", "Re-summarize")
+            dialog.set_response_appearance("summarize", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.set_default_response("cancel")
+            dialog.set_close_response("cancel")
+            dialog.connect("response", lambda d, r: self._start_summarize(transcript) if r == "summarize" else None)
+            dialog.present(self)
+        else:
+            self._start_summarize(transcript)
+
+    def _start_summarize(self, transcript: str):
         self._summarize_btn.set_sensitive(False)
         self._summary_buf.set_text("")
         self._summary_header_buf = []
@@ -535,10 +791,14 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._meeting_title = None
         self._set_status("Generating meeting notes…")
 
+        def _on_summary_error(e):
+            self._summarize_btn.set_sensitive(True)
+            self._ui_show_error("Summary error", e)
+
         summarizer = Summarizer(
             on_token=lambda t: GLib.idle_add(self._ui_stream_summary, t),
             on_complete=lambda s: GLib.idle_add(self._ui_summary_done, s),
-            on_error=lambda e: GLib.idle_add(self._ui_show_error, "Summary error", e),
+            on_error=lambda e: GLib.idle_add(_on_summary_error, e),
         )
         summarizer.summarize(transcript)
 
@@ -779,7 +1039,7 @@ class GranolaApp(Adw.Application):
 
     def __init__(self):
         super().__init__(
-            application_id="io.github.fedora-granola",
+            application_id="io.github.eatmo",
             flags=Gio.ApplicationFlags.DEFAULT_FLAGS,
         )
         self.connect("activate", self._on_activate)

@@ -16,16 +16,20 @@ WHISPER_DEVICE = "auto"    # auto, cpu, cuda
 WHISPER_COMPUTE_TYPE = "int8"  # int8 for CPU, float16 for CUDA
 
 # --- LLM Provider ---
-# Set GRANOLA_PROVIDER to "openai" to use OpenAI instead of Anthropic
+# "anthropic", "openai", or "ollama"
 LLM_PROVIDER = os.environ.get("GRANOLA_PROVIDER", "anthropic").lower()
 
 # --- Anthropic / Claude ---
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = os.environ.get("EATMO_ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 # --- OpenAI ---
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("GRANOLA_OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.environ.get("EATMO_OPENAI_MODEL", "gpt-4o")
+
+# --- Local (Ollama) ---
+OLLAMA_BASE_URL = "http://localhost:11434/v1"
+OLLAMA_MODEL = os.environ.get("EATMO_OLLAMA_MODEL", "llama3.1")
 
 SUMMARY_SYSTEM_PROMPT = """\
 You are an expert meeting note-taker. Given a raw transcript, your response \
@@ -49,10 +53,10 @@ If the answer isn't in the context, say so clearly.\
 """
 
 # --- Storage ---
-DATA_DIR = Path.home() / ".local" / "share" / "fedora-granola"
+DATA_DIR = Path.home() / ".local" / "share" / "eatmo"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-CONFIG_DIR = Path.home() / ".config" / "fedora-granola"
+CONFIG_DIR = Path.home() / ".config" / "eatmo"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Load keys from config file if not in env
@@ -66,3 +70,32 @@ if _config_env.exists():
             OPENAI_API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
         elif line.startswith("GRANOLA_PROVIDER="):
             LLM_PROVIDER = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+        elif line.startswith("EATMO_ANTHROPIC_MODEL="):
+            CLAUDE_MODEL = line.split("=", 1)[1].strip().strip('"').strip("'")
+        elif line.startswith("EATMO_OPENAI_MODEL="):
+            OPENAI_MODEL = line.split("=", 1)[1].strip().strip('"').strip("'")
+        elif line.startswith("EATMO_OLLAMA_MODEL="):
+            OLLAMA_MODEL = line.split("=", 1)[1].strip().strip('"').strip("'")
+
+
+def save_setting(key: str, value: str):
+    """Update or add a key=value line in config.env, and update this module's attribute."""
+    env_path = CONFIG_DIR / "config.env"
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+
+    found = False
+    result = []
+    for ln in lines:
+        if ln.strip().startswith(f"{key}="):
+            result.append(f"{key}={value}")
+            found = True
+        else:
+            result.append(ln)
+    if not found:
+        result.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(result) + "\n")
+
+    # Update this module's attribute so callers reading config.X see the new value
+    import sys
+    setattr(sys.modules[__name__], key, value)

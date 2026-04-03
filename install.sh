@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fedora Granola - System dependency installer for Fedora
+# eatmo - System dependency installer for Fedora
 set -e
 
 echo "Installing system dependencies..."
@@ -35,4 +35,4 @@ echo "To run Fedora Granola:"
 echo "  1. Set your Anthropic API key: export ANTHROPIC_API_KEY=your_key_here"
 echo "  2. Run: venv/bin/python main.py"
 echo ""
-echo "Or add the API key to ~/.config/fedora-granola/config.env"
+echo "Or add the API key to ~/.config/eatmo/config.env"

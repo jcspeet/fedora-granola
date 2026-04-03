@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=eatmo
+Comment=AI-powered meeting transcription and notes
+Exec=/home/jarmo/Projects/eatmo/launch.sh
+Icon=eatmo
+Terminal=false
+Type=Application
+Categories=Office;AudioVideo;
+Keywords=meeting;transcription;notes;AI;
+StartupWMClass=fedora-granola

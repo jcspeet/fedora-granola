@@ -28,11 +28,19 @@ echo "Installing Python dependencies..."
 venv/bin/pip install --upgrade pip
 venv/bin/pip install -r requirements.txt
 
+echo "Installing desktop launcher and icon..."
+ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+DESKTOP_DIR="$HOME/.local/share/applications"
+mkdir -p "$ICON_DIR" "$DESKTOP_DIR"
+cp "$(dirname "$0")/eatmo.svg" "$ICON_DIR/eatmo.svg"
+cp "$(dirname "$0")/eatmo.desktop" "$DESKTOP_DIR/eatmo.desktop"
+gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+
 echo ""
 echo "Installation complete!"
 echo ""
-echo "To run Fedora Granola:"
-echo "  1. Set your Anthropic API key: export ANTHROPIC_API_KEY=your_key_here"
-echo "  2. Run: venv/bin/python main.py"
+echo "eatmo should now appear in your application launcher."
+echo "On first launch, open Settings and enter your API key."
 echo ""
 echo "Or add the API key to ~/.config/eatmo/config.env"

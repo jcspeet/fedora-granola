@@ -254,21 +254,30 @@ class SettingsDialog(Adw.Window):
         provider = _PROVIDER_KEYS[provider_idx]
 
         config.save_setting("GRANOLA_PROVIDER", provider)
+        config.LLM_PROVIDER = provider
 
         if provider == "anthropic":
             config.save_setting("ANTHROPIC_API_KEY", self._key_row.get_text().strip())
+            config.ANTHROPIC_API_KEY = self._key_row.get_text().strip()
             model_idx = self._model_combo.get_selected()
             if self._fetched_models and model_idx < len(self._fetched_models):
-                config.save_setting("EATMO_ANTHROPIC_MODEL", self._fetched_models[model_idx])
+                model = self._fetched_models[model_idx]
+                config.save_setting("EATMO_ANTHROPIC_MODEL", model)
+                config.CLAUDE_MODEL = model
         elif provider == "openai":
             config.save_setting("OPENAI_API_KEY", self._key_row.get_text().strip())
+            config.OPENAI_API_KEY = self._key_row.get_text().strip()
             model_idx = self._model_combo.get_selected()
             if self._fetched_models and model_idx < len(self._fetched_models):
-                config.save_setting("EATMO_OPENAI_MODEL", self._fetched_models[model_idx])
+                model = self._fetched_models[model_idx]
+                config.save_setting("EATMO_OPENAI_MODEL", model)
+                config.OPENAI_MODEL = model
         else:
             model_idx = self._model_combo.get_selected()
             if self._fetched_models and model_idx < len(self._fetched_models):
-                config.save_setting("EATMO_OLLAMA_MODEL", self._fetched_models[model_idx])
+                model = self._fetched_models[model_idx]
+                config.save_setting("EATMO_OLLAMA_MODEL", model)
+                config.OLLAMA_MODEL = model
 
         self.close()
 
@@ -613,6 +622,7 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._current_save_path = path
         self.set_title(f"Fedora Granola — {title}")
         self._set_ui_editable(False)
+        self._summarize_btn.set_sensitive(bool(transcript.strip()))
         self._set_status(f"Viewing: {title}  ({dt.strftime('%b %d, %Y')})")
         self._chat_mode = "meeting"
         self._clear_chat()
@@ -654,7 +664,6 @@ class GranolaWindow(Adw.ApplicationWindow):
             # Never disable the record button while recording — user must be able to stop
             if not self._recording:
                 self._record_btn.set_sensitive(False)
-            self._summarize_btn.set_sensitive(False)
             self._save_btn.set_sensitive(False)
 
     # ------------------------------------------------------------------
@@ -753,6 +762,28 @@ class GranolaWindow(Adw.ApplicationWindow):
             self._ui_show_error("Nothing to summarize", "The transcript is empty.")
             return
 
+        existing = self._summary_buf.get_text(
+            self._summary_buf.get_start_iter(),
+            self._summary_buf.get_end_iter(),
+            False,
+        ).strip()
+
+        if existing:
+            dialog = Adw.AlertDialog(
+                heading="Re-summarize?",
+                body="This will replace the existing summary.",
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("summarize", "Re-summarize")
+            dialog.set_response_appearance("summarize", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.set_default_response("cancel")
+            dialog.set_close_response("cancel")
+            dialog.connect("response", lambda d, r: self._start_summarize(transcript) if r == "summarize" else None)
+            dialog.present(self)
+        else:
+            self._start_summarize(transcript)
+
+    def _start_summarize(self, transcript: str):
         self._summarize_btn.set_sensitive(False)
         self._summary_buf.set_text("")
         self._summary_header_buf = []
@@ -760,10 +791,14 @@ class GranolaWindow(Adw.ApplicationWindow):
         self._meeting_title = None
         self._set_status("Generating meeting notes…")
 
+        def _on_summary_error(e):
+            self._summarize_btn.set_sensitive(True)
+            self._ui_show_error("Summary error", e)
+
         summarizer = Summarizer(
             on_token=lambda t: GLib.idle_add(self._ui_stream_summary, t),
             on_complete=lambda s: GLib.idle_add(self._ui_summary_done, s),
-            on_error=lambda e: GLib.idle_add(self._ui_show_error, "Summary error", e),
+            on_error=lambda e: GLib.idle_add(_on_summary_error, e),
         )
         summarizer.summarize(transcript)
 
